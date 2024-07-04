@@ -1,0 +1,14 @@
+OS_Ex3:
+
+First, few general points about question 1 and 2:
+
+1.  at first, implement korsaju by list.
+2. analyze the required data: 
+2a. list is faster than deque.
+2b. the graph represntation is preferd at list.
+conclusion: after the profiling, the best implementation: graph implementation by adjancy list, kosaraju algorithem preferd list over deque.
+full analyze is at the files, 2a,2b(txt format).
+
+rest of the required data is at each folder q3,q4,....,q10.
+
+Natureally the code improve at all section of the assignment , obsessively the most improved code is at section 10.
