@@ -10,12 +10,16 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sstream>
-#include <thread>
+#include <pthread.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <sys/wait.h>
 #define PORT "9034"
+#include "proactor.hpp"
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+std::vector<std::list<int>> adj;
 
 enum class Command{
     Newgraph,
@@ -38,13 +42,14 @@ Command getCommandFromString(const std::string& commandStr) {
         return Command::Newedge;
     } else if (lowerCommand == "removeedge\n") {
         return Command::Removeedge;
-    } else if (lowerCommand == "Exit\n") {
+    } else if (lowerCommand == "exit\n") {
         return Command::Exit;
     }
     else {
         return Command::Invalid;
     }
 }
+
 
 void DFS1(int v, std::vector<std::list<int>>& adj, std::vector<bool>& visited, std::list<int>& List)
 {
@@ -72,9 +77,8 @@ void DFS2(int v, std::vector<std::list<int>>& adj, std::vector<bool>& visited, s
     }
 }
 
-void kosaraju(std::vector<std::list<int>>& adj)
+void kosaraju(std::vector<std::list<int>>& adj ,int clientfd)
 {
-
     int n=adj.size();
     std::list<int> List;
     std::vector<bool> visited(n, false);
@@ -100,23 +104,36 @@ void kosaraju(std::vector<std::list<int>>& adj)
     {
         if (!visited[v])
         {
+
+            std::string response= "SCC: ";
             std::vector<int> component;
             DFS2(v, transposed_adj, visited, component);
-            std::cout << "SCC: ";
+            
             for (int i : component)
             {
-                std::cout << i + 1 << " ";
+                response.append(std::to_string(i+1));
+                response.append(" ");
             }
-            std::cout << std::endl;
+            response += "\n";
+            send(clientfd, response.c_str(), response.size(), 0);
         }
     }
+    
 }
 
-std::vector<std::list<int>> Newgraph(std::vector<std::list<int>> &adj){
+void Newgraph(std::vector<std::list<int>> &adj,int clientfd){
+
     int vertex,edges;
-    std::cout << "Please enter the number of vertices and edges: \n";
+    std::string message;
+    message="Please enter the number of vertices and edges: \n";
+
+    send(clientfd, message.c_str(), message.size(), 0);
+    message.clear();
     std::cin >> vertex >> edges;
-    std::cout << "Please enter the edges: " << std::endl;
+    message="Please enter the edges: \n";
+    send(clientfd, message.c_str(), message.size(), 0);
+    message.clear();
+
     adj.resize(vertex);
     for (int i = 0; i < edges; i++)
     {
@@ -124,22 +141,29 @@ std::vector<std::list<int>> Newgraph(std::vector<std::list<int>> &adj){
         std::cin >>u >> v;
         adj[u - 1].push_back(v - 1);
     }
-    std::cout<<"The graph has created!\n";
-    return adj;
+    message="The graph has created!\n";
+    send(clientfd, message.c_str(), message.size(), 0);
+    message.clear();
+    return;
 }
 
-void Newedge(std::vector<std::list<int>> &adj){
+void Newedge(std::vector<std::list<int>> &adj,int clientfd){
 
     int i,j;
-    std::cout<<"Please enter edge you wish to add\n";
+    std::string message="Please enter edge you wish to add\n";
+    send(clientfd, message.c_str(), message.size(), 0);
+    message.clear();
+    //std::cout<<"Please enter edge you wish to add\n";
     std::cin>>i;
     std::cin>>j;
     adj[i].push_back(j);
 }
 
-void Removeedge(std::vector<std::list<int>> &adj){
+void Removeedge(std::vector<std::list<int>> &adj,int clientfd){
     int i, j;
-    std::cout << "Enter edge to remove (i j): ";
+    std::string message="Enter edge to remove (i j): ";
+    send(clientfd, message.c_str(), message.size(), 0);
+    message.clear();
     std::cin >> i >> j;
 
     // Check if vertex i exists in the adjacency list and if j is in its list
@@ -156,70 +180,64 @@ void Removeedge(std::vector<std::list<int>> &adj){
         }
 
         if (found) {
-            std::cout << "Edge (" << i  << ", " << j  << ") removed.\n" << std::endl;
+            message = "Edge: (" +std::to_string(i) + " , "+ std::to_string(j) + " ) removed.\n";
+            send(clientfd, message.c_str(), message.size(), 0);
+            //std::to_string(i) ;  std::to_string(j)
         } else {
-            std::cout << "Edge (" << i  << ", " << j  << ") not found.\n" << std::endl;
+           message= "Edge: (" +std::to_string(i) + " , "+ std::to_string(j) + " ) not found.\n";
+            send(clientfd, message.c_str(), message.size(), 0);
         }
     } else {
-        std::cout << "Invalid vertices!\n" << std::endl;
+         message= "Invalid vertices!\n" ;
+         send(clientfd, message.c_str(), message.size(), 0);
     }
 }
 
-void del_from_pfds(struct pollfd pfds[], int i, int *fd_count)
-{
-    close(pfds[i].fd);
-    // Copy the one from the end over this one
-    pfds[i] = pfds[*fd_count-1];
-    (*fd_count)--;
-}
-
-std::string handle_recieve_data(struct pollfd pfds[],int index, int *fd_count){
+std::string handle_recieve_data(int client_fd){
 // If not the listener, w int sender_fd = poll_fds[index].fd;e're just a regular client
     char buf[256];
-    int nbytes = recv(pfds[index].fd, buf, sizeof buf, 0);
-    int sender_fd = pfds[index].fd;
-
+    int nbytes = recv(client_fd, buf, sizeof buf, 0);
     if (nbytes <= 0) {
      // Got error or connection closed by client
-        if (nbytes == 0) {
-                            // Connection closed
-          printf("pollserver: socket %d hung up\n", sender_fd);
-                 } else {
-                        perror("recv");
-                        }
-                        close(pfds[index].fd); // Bye!
-                        del_from_pfds(pfds,index,fd_count);   
-
+        if(nbytes==0){
+          printf("socket %d hung up\n", client_fd);
+         }else
+                std::cout<<"recv\n";
+                    close(client_fd);
+                    return "exit";      
     }   
         buf[nbytes]='\0';
         std::string input(buf);
         return input;
 }
 
-void Command_Shift(struct pollfd pfds[],int index, int *fd_count,std::vector<std::list<int>> &adj){
-    
+void * Command_Shift(void * client_socket){
+
+        pthread_mutex_lock(&mutex);
+        int client_fd=  *(int*)client_socket;
+        dup2(client_fd, STDIN_FILENO);  
         std::string input;
         Command command = Command::Invalid;
-        if (command != Command::Exit) {
+        while (command != Command::Exit) {
         
-        input=handle_recieve_data(pfds,index,fd_count);
+        input=handle_recieve_data(client_fd);
         command = getCommandFromString(input);
 
         switch (command) {
             case Command::Newgraph:
-                Newgraph(adj);
+                Newgraph(adj,client_fd);
                 break;
 
             case Command::Kosaraju:
-                kosaraju(adj);
+                kosaraju(adj,client_fd);
                 break;
 
             case Command::Newedge:
-                Newedge(adj);
+                Newedge(adj,client_fd);
                 break;
 
             case Command::Removeedge:
-                Removeedge(adj);
+                Removeedge(adj,client_fd);
                 break;
 
             case Command::Invalid:
@@ -228,9 +246,11 @@ void Command_Shift(struct pollfd pfds[],int index, int *fd_count,std::vector<std
 
             case Command::Exit:
                 break;
-            }
+            
         }
-    
+    }      
+        pthread_mutex_unlock(&mutex);
+        return NULL;
 }
 
 void *get_in_addr(struct sockaddr *sa)
@@ -245,9 +265,7 @@ void *get_in_addr(struct sockaddr *sa)
 int setup_server() {
 
     int server_fd;
-    struct sockaddr_in  address;
-
-                            
+    struct sockaddr_in  address;                            
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
@@ -257,6 +275,11 @@ int setup_server() {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(9034);
 
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+    perror("setsockopt");
+    return -1;
+}
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
         close(server_fd);
@@ -273,86 +296,50 @@ int setup_server() {
     return server_fd;
 }
 // Function to add a client.
-int setup_poll_connection(int server_fd,struct pollfd pfds[]) {
-    int sock;
+int setup_client_connection(int server_fd) {
     struct sockaddr_storage remoteaddr;
-    socklen_t addrlen = sizeof remoteaddr;
+    socklen_t addrlen = sizeof(remoteaddr);
     char remoteIP[INET6_ADDRSTRLEN];
+    int new_fd;
 
-    // Create socket
-    if((sock = accept(server_fd, (struct sockaddr *)&remoteaddr, &addrlen)) < 0){ // Accepts a new client connection and creates a new socket for that connection
+    // Accept the new connection
+    new_fd = accept(server_fd, (struct sockaddr*)&remoteaddr, &addrlen);
+    if (new_fd == -1) {
         perror("accept");
         return -1;
-    }else{
-     
-    printf("pollserver: new connection from %s on ""socket %d\n",
-             inet_ntop(remoteaddr.ss_family,
-              get_in_addr((struct sockaddr*)&remoteaddr),
-                  remoteIP, INET6_ADDRSTRLEN),
-                            sock);
-
-    // Add new client to poll_fds
-    pollfd client_pollfd = {sock, POLLIN, 0};
-    return sock;
-    }
-}
-
-void add_to_pfds(struct pollfd *pfds[], int newfd, int *fd_count, int *fd_size)
-{
-    // If we don't have room, add more space in the pfds array
-    if (*fd_count == *fd_size) {
-        *fd_size *= 2; // Double it
-
-         *pfds = (pollfd *) realloc(*pfds, sizeof(**pfds) * (*fd_size));
-
     }
 
-    (*pfds)[*fd_count].fd = newfd;
-    (*pfds)[*fd_count].events = POLLIN; // Check ready-to-read
+    // Convert the IP address to a string and print it
+    if (remoteaddr.ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in*)&remoteaddr;
+        inet_ntop(AF_INET, &s->sin_addr, remoteIP, sizeof(remoteIP));
+    } else { // AF_INET6
+        struct sockaddr_in6 *s = (struct sockaddr_in6*)&remoteaddr;
+        inet_ntop(AF_INET6, &s->sin6_addr, remoteIP, sizeof(remoteIP));
+    }
+    printf("New connection from %s on socket %d\n", remoteIP, new_fd);
 
-    (*fd_count)++;	
+    return new_fd;
 }
 
-int main()
-{
+int main() {
     // Set up server
     int server_fd = setup_server();
     if (server_fd < 0) {
         std::cerr << "Failed to set up server\n";
         return 1;
     }
-    std::vector<std::list<int>> adj;
-    int fd_size = 5;
-    struct pollfd *pfds = (pollfd *)malloc(sizeof *pfds * fd_size);
-    pfds[0].fd = server_fd;
-    pfds[0].events = POLLIN;
-    int fd_count = 1;
-
     while (true) {
-        int poll_count = poll(pfds, fd_count, -1);
-        if (poll_count == -1) {
-            perror("poll");
-            exit(1);
-        }
-
-         for(int i = 0; i < fd_count; i++) {
-
-            if (pfds[i].revents & POLLIN) {
-
-                if (pfds[i].fd == server_fd) {
-                    // Accept new connection
-                    int newfd=setup_poll_connection(server_fd,pfds);
-                    if(newfd==-1) perror("accept");else{
-                    add_to_pfds(&pfds, newfd, &fd_count, &fd_size);
-                     }                     
-                } else {
-                    dup2(pfds[i].fd,STDIN_FILENO);
-                    // Handle incoming message from a client
-                    Command_Shift(pfds,i,&fd_count,adj);
-                }
-                
-             }
-        }
+        int client_fd= setup_client_connection(server_fd);  
+            if(client_fd==-1){
+                close(client_fd);
+                return 1;
+            }
+            pthread_t client=startProactor(client_fd,Command_Shift);
+            pthread_detach(client);
+            //stopProactor(client);
     }
+
+    close(server_fd);
     return 0;
 }

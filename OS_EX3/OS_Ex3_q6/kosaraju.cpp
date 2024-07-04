@@ -15,7 +15,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <sys/wait.h>
+#include "reactor.hpp"
+#include <poll.h>
 #define PORT "9034"
+
+std::vector<std::list<int>> adj;
+   Reactor * reactor= static_cast<Reactor *>(startReactor());
 
 enum class Command{
     Newgraph,
@@ -38,7 +43,7 @@ Command getCommandFromString(const std::string& commandStr) {
         return Command::Newedge;
     } else if (lowerCommand == "removeedge\n") {
         return Command::Removeedge;
-    } else if (lowerCommand == "Exit\n") {
+    } else if (lowerCommand == "exit\n") {
         return Command::Exit;
     }
     else {
@@ -74,7 +79,7 @@ void DFS2(int v, std::vector<std::list<int>>& adj, std::vector<bool>& visited, s
 
 void kosaraju(std::vector<std::list<int>>& adj)
 {
-
+    std::cout<<"Kabab\n";
     int n=adj.size();
     std::list<int> List;
     std::vector<bool> visited(n, false);
@@ -165,44 +170,28 @@ void Removeedge(std::vector<std::list<int>> &adj){
     }
 }
 
-void del_from_pfds(struct pollfd pfds[], int i, int *fd_count)
-{
-    close(pfds[i].fd);
-    // Copy the one from the end over this one
-    pfds[i] = pfds[*fd_count-1];
-    (*fd_count)--;
-}
-
-std::string handle_recieve_data(struct pollfd pfds[],int index, int *fd_count){
+std::string handle_recieve_data(int index){
 // If not the listener, w int sender_fd = poll_fds[index].fd;e're just a regular client
     char buf[256];
-    int nbytes = recv(pfds[index].fd, buf, sizeof buf, 0);
-    int sender_fd = pfds[index].fd;
-
+    int nbytes = recv(index, buf, sizeof buf, 0);
     if (nbytes <= 0) {
      // Got error or connection closed by client
-        if (nbytes == 0) {
-                            // Connection closed
-          printf("pollserver: socket %d hung up\n", sender_fd);
-                 } else {
-                        perror("recv");
-                        }
-                        close(pfds[index].fd); // Bye!
-                        del_from_pfds(pfds,index,fd_count);   
-
+            removeFdFromReactor(reactor,index);
+                return "fail";
     }   
         buf[nbytes]='\0';
         std::string input(buf);
         return input;
 }
 
-void Command_Shift(struct pollfd pfds[],int index, int *fd_count,std::vector<std::list<int>> &adj){
+void *Command_Shift(int index){
     
         std::string input;
         Command command = Command::Invalid;
+
         if (command != Command::Exit) {
         
-        input=handle_recieve_data(pfds,index,fd_count);
+        input=handle_recieve_data(index);
         command = getCommandFromString(input);
 
         switch (command) {
@@ -229,8 +218,8 @@ void Command_Shift(struct pollfd pfds[],int index, int *fd_count,std::vector<std
             case Command::Exit:
                 break;
             }
-        }
-    
+        }   
+        return  (void*)0;
 }
 
 void *get_in_addr(struct sockaddr *sa)
@@ -256,6 +245,11 @@ int setup_server() {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(9034);
+int opt = 1;
+if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+    perror("setsockopt");
+    return -1;
+}
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
@@ -273,8 +267,9 @@ int setup_server() {
     return server_fd;
 }
 // Function to add a client.
-int setup_poll_connection(int server_fd,struct pollfd pfds[]) {
-    int sock;
+int setup_poll_connection(int server_fd) { 
+
+    int sock;   
     struct sockaddr_storage remoteaddr;
     socklen_t addrlen = sizeof remoteaddr;
     char remoteIP[INET6_ADDRSTRLEN];
@@ -283,75 +278,63 @@ int setup_poll_connection(int server_fd,struct pollfd pfds[]) {
     if((sock = accept(server_fd, (struct sockaddr *)&remoteaddr, &addrlen)) < 0){ // Accepts a new client connection and creates a new socket for that connection
         perror("accept");
         return -1;
-    }else{
-     
+    }
+
+    else{
     printf("pollserver: new connection from %s on ""socket %d\n",
              inet_ntop(remoteaddr.ss_family,
               get_in_addr((struct sockaddr*)&remoteaddr),
                   remoteIP, INET6_ADDRSTRLEN),
                             sock);
-
-    // Add new client to poll_fds
-    pollfd client_pollfd = {sock, POLLIN, 0};
-    return sock;
+        return sock;
     }
 }
 
-void add_to_pfds(struct pollfd *pfds[], int newfd, int *fd_count, int *fd_size)
-{
-    // If we don't have room, add more space in the pfds array
-    if (*fd_count == *fd_size) {
-        *fd_size *= 2; // Double it
+void * handle_hot_fd(int fd){
 
-         *pfds = (pollfd *) realloc(*pfds, sizeof(**pfds) * (*fd_size));
-
+    if ( fd == reactor->pfds[0].fd) {
+        int newfd=setup_poll_connection(fd);
+        if(newfd==-1)return  (int)(intptr_t)0;
+        int res=addFdToReactor(reactor,newfd,Command_Shift);
+        if(res<0) return nullptr;else 
+        printf("%d\n",res);
+        return (void*)1;
     }
-
-    (*pfds)[*fd_count].fd = newfd;
-    (*pfds)[*fd_count].events = POLLIN; // Check ready-to-read
-
-    (*fd_count)++;	
+    else{  
+        return nullptr;
+    }
 }
 
-int main()
-{
+int main() {
     // Set up server
     int server_fd = setup_server();
     if (server_fd < 0) {
         std::cerr << "Failed to set up server\n";
         return 1;
     }
+
+    reactor->pfds[0].fd = server_fd;
+    reactor->pfds[0].events =  POLLIN;
+    reactor->curr_index = 1;
+
     std::vector<std::list<int>> adj;
-    int fd_size = 5;
-    struct pollfd *pfds = (pollfd *)malloc(sizeof *pfds * fd_size);
-    pfds[0].fd = server_fd;
-    pfds[0].events = POLLIN;
-    int fd_count = 1;
 
     while (true) {
-        int poll_count = poll(pfds, fd_count, -1);
+        int poll_count = poll(reactor->pfds, reactor->curr_index, -1);
+
         if (poll_count == -1) {
             perror("poll");
             exit(1);
         }
 
-         for(int i = 0; i < fd_count; i++) {
-
-            if (pfds[i].revents & POLLIN) {
-
-                if (pfds[i].fd == server_fd) {
-                    // Accept new connection
-                    int newfd=setup_poll_connection(server_fd,pfds);
-                    if(newfd==-1) perror("accept");else{
-                    add_to_pfds(&pfds, newfd, &fd_count, &fd_size);
-                     }                     
-                } else {
-                    dup2(pfds[i].fd,STDIN_FILENO);
-                    // Handle incoming message from a client
-                    Command_Shift(pfds,i,&fd_count,adj);
-                }
-                
-             }
+        for (int i = 0; i < reactor->curr_index; i++) {
+            if (reactor->pfds[i].revents & POLLIN) {
+               if( handle_hot_fd(reactor->pfds[i].fd)==nullptr){
+                    dup2(reactor->pfds[i].fd,STDIN_FILENO);
+                  reactor->funcs[i](reactor->pfds[i].fd);
+                   
+               }
+            }
         }
     }
     return 0;
